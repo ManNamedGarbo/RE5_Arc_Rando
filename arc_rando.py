@@ -47,16 +47,17 @@ def update_item_ids(input_file, arc_folder, mapping_file):
         return
     step_start_time = log_step_time(step_start_time, "Loading location mappings")
 
-    # Step 2: Read the input JSON file (which contains locations and new ItemIDs)
-    logging.info("Starting to read input JSON...")
-    step_start_time = time.time()
-    try:
-        with open(input_file, 'r') as infile:
-            input_data = json.load(infile)
-    except Exception as e:
-        logging.error(f"Error reading input file {input_file}: {e}")
-        return
-    step_start_time = log_step_time(step_start_time, "Reading input JSON")
+# Step 2: Load location-to-file mapping from the external JSON file using the existing function
+logging.info("Starting to load location mappings...")
+step_start_time = time.time()
+try:
+    location_to_file_mapping = load_location_mapping(mapping_file)
+except Exception as e:
+    logging.error(f"Failed to load location mappings: {e}")
+    print(f"Error loading location mapping {e}")  # Print the error, instead of only logging it
+    return  # Exit if the mapping file loading fails
+step_start_time = log_step_time(step_start_time, "Loading location mappings")
+
 
     # List to keep track of the unpacked directories that need to be repacked
     unpacked_folders_to_repack = []
