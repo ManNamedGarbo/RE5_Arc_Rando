@@ -20,12 +20,18 @@ def log_step_time(start_time, step_name):
 def load_location_mapping(mapping_file):
     """Load the location-to-file mapping from a JSON file."""
     try:
+        print(f"Loading location mapping from {mapping_file}...")  # Print to show it's starting
         if not os.path.exists(mapping_file):
             raise FileNotFoundError(f"Mapping file {mapping_file} not found.")
+        
         with open(mapping_file, 'r') as file:
-            return json.load(file)
+            loaded_file = json.load(file)
+            print("Loaded mapping file successfully.")  # Lets us know it loaded the file
+            
+            return loaded_file  # Return the loaded data
     except Exception as e:
         logging.error(f"Error loading mapping file {mapping_file}: {e}")
+        print(f"Error loading mapping file {mapping_file}: {e}")  # Print the error, instead of only logging it.
         raise
 
 def update_item_ids(input_file, arc_folder, mapping_file):
