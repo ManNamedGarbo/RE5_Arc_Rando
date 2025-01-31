@@ -64,22 +64,22 @@ step_start_time = log_step_time(step_start_time, "Loading location mappings")
 
     # Step 3: Loop through input data (locations and ItemIDs)
     for i in range(0, len(input_data) - 1, 2):
-        location_line = input_data[i]  # Location (e.g., "loc:uWp13")
-        new_item_id = input_data[i + 1]  # New ItemID (e.g., 1025)
+        location_id = input_data[i]  # Location ID (e.g., "uWp13")
+        new_item_id = input_data[i + 1]  # New ItemID (e.g., 1024)
 
-        # Extract location ID from the line (assumes format "loc:<location_id>")
-        location_id = location_line.split(":")[1].strip()
+        # Now, directly use the location_id as it is
+        logging.info(f"Processing location {location_id} with new ItemID {new_item_id}...")
 
         # Step 4: Determine which file corresponds to this location ID
         if location_id not in location_to_file_mapping:
             logging.warning(f"No output file mapped for location {location_id}. Skipping...")
             continue  # Skip if there's no file mapped for this location
-        
-        arc_file = location_to_file_mapping[location_id]
+    
+        arc_file = location_to_file_mapping[location_id]  # Get the .arc file from the mapping
         arc_path = os.path.join(arc_folder, arc_file)  # Full path to the .arc file
 
         # Check if the .arc file exists
-        if not os.path.exists(arc_path):
+       if not os.path.exists(arc_path):
             logging.error(f"The file {arc_file} does not exist in the specified folder. Skipping...")
             continue
 
