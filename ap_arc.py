@@ -1,13 +1,14 @@
-import json, os, subprocess, shutil, logging, time, concurrent.futures, threading
+import json, os, subprocess, shutil, logging, time, concurrent.futures, threading, sys, xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog
 
 # Set up logging
 try:
     if getattr(sys, 'frozen', False):
-        exe_folder = os.path.dirname(sys.executable)  # Path for PyInstaller-bundled executable
+        exe_folder = os.path.dirname(sys.executable)  # For PyInstaller executable
     else:
-        exe_folder = os.path.dirname(os.path.abspath(__file__))  # Path for running as a script
+        exe_folder = os.path.dirname(os.path.abspath(__file__))  # For running as a script
+    os.chdir(exe_folder)  # Set the working directory to the folder containing the executable
     os.chdir(exe_folder)  # Set the working directory to the folder containing the executable
     logs_folder = os.path.join(exe_folder, 'logs')
     os.makedirs(logs_folder, exist_ok=True)
@@ -42,7 +43,8 @@ def unpack_arc_file(arc_file, arc_folder):
     shutil.copy2(original_arc_path, temp_arc_path)
     logging.info(f"Successfully copied {arc_file}.")
     logging.info(f"Unpacking {arc_file} using pc-re5.bat...")
-    subprocess.run([os.path.join(exe_folder, 'pc-re5.bat'), temp_arc_path], check=True)
+    script_name = 'pc-re5.bat' if os.name == 'nt' else 'pc-re5.sh'
+    subprocess.run([os.path.join(exe_folder, script_name), temp_arc_path], check=True)
     logging.info(f"Successfully unpacked {arc_file}.")
 
 def process_arc_file_batch(output_folder, arc_file, modifications):
@@ -54,36 +56,51 @@ def process_arc_file_batch(output_folder, arc_file, modifications):
         return
 
     try:
-        with open(xml_file_path, 'r') as file:
-            lines = file.readlines()
+        tree = ET.parse(xml_file_path)
+        root = tree.getroot()
         
-        for line_number, new_item_id in modifications:
-            if line_number - 1 < len(lines):
-                if '<u16 name="ItemId" value="' in lines[line_number - 1]:
-                    start = lines[line_number - 1].find('<u16 name="ItemId" value="') + len('<u16 name="ItemId" value="')
-                    end = lines[line_number - 1].find('"', start)
-                    lines[line_number - 1] = (
-                        lines[line_number - 1][:start] + str(new_item_id) + lines[line_number - 1][end:]
-                    )
+        for line_number, new_item_id, vanilla_item in modifications:
+            found = False
+            closest_unit_class = None
+            
+            # Find the closest mUnitClass with matching vanilla_item
+            closest_distance = float('inf')
+            for elem in root.iter('mUnitClass'):
+                if vanilla_item in elem.attrib.get('name', ''):
+                    current_line = list(root.iter()).index(elem)
+                    distance = abs(current_line - (line_number - 1))
+                    if distance < closest_distance:
+                        closest_distance = distance
+                        closest_unit_class = elem
+            
+            if closest_unit_class is not None:
+                # Update the corresponding ClassRef's ItemId below the found mUnitClass
+                for class_ref in closest_unit_class.iter('ClassRef'):
+                    item_id_elem = class_ref.find(".//u16[@name='ItemId']")
+                    if item_id_elem is not None:
+                        old_value = item_id_elem.attrib.get('value')
+                        item_id_elem.set('value', str(new_item_id))
+                        logging.info(f"Updated ItemId from {old_value} to {new_item_id} for {vanilla_item} in {xml_file_path}.")
+                        found = True
+                        break
+            
+            if not found:
+                logging.error(f"Vanilla item '{vanilla_item}' not found in {xml_file_path}. Attempting to find nearest ItemId based on line number {line_number}.")
+                closest_distance = float('inf')
+                closest_item_id_elem = None
+                for i, elem in enumerate(root.iter('u16')):
+                    if elem.attrib.get('name') == 'ItemId':
+                        distance = abs(i - (line_number - 1))
+                        if distance < closest_distance:
+                            closest_distance = distance
+                            closest_item_id_elem = elem
+                if closest_item_id_elem is not None:
+                    old_value = closest_item_id_elem.attrib.get('value')
+                    closest_item_id_elem.set('value', str(new_item_id))
+                    logging.info(f"Updated nearest ItemId from {old_value} to {new_item_id} in {xml_file_path}.")
+                    found = True
                 else:
-                    logging.error(f"ItemId not found at line {line_number} in {xml_file_path}. Skipping...")
-            else:
-                logging.error(f"Line number {line_number} out of range in {xml_file_path}. Skipping...")
-        
-        with open(xml_file_path, 'w') as file:
-            file.writelines(lines)
-        
-        logging.info(f"Applied all changes to {xml_file_path}.")
-        subprocess.run([os.path.join(exe_folder, 'pc-re5.bat'), os.path.join(exe_folder, unpack_folder)], check=True)
-
-        repacked_file = os.path.join(exe_folder, f"{unpack_folder}.arc")
-        logging.info(f"Moving repacked {unpack_folder}.arc to output folder...")
-        shutil.move(repacked_file, os.path.join(output_folder, f"{unpack_folder}.arc"))
-        logging.info(f"Successfully moved {unpack_folder}.arc to output.")
-        shutil.rmtree(os.path.join(exe_folder, unpack_folder))
-
-    except Exception as e:
-        logging.error(f"Error processing {xml_file_path}: {e}")
+                    logging.error(f"No nearby ItemId found around line {line_number} in {xml_file_path}. Skipping...")
 
 def update_item_ids(arc_folder):
     try:
