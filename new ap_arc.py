@@ -1,6 +1,7 @@
 import json, os, subprocess, shutil, logging, time, concurrent.futures, threading, sys, xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog
+from typing import Dict, List, Tuple
 
 # Set up logging
 try:
@@ -20,6 +21,148 @@ try:
     )
 except Exception as e:
     print(f"Failed to initialize logging: {e}")
+
+class XMLItemCache:
+    def __init__(self, xml_file_path: str):
+        """
+        Initialize the cache by parsing the XML file and storing item information
+        
+        :param xml_file_path: Path to the XML file to parse
+        """
+        self.xml_file_path = xml_file_path
+        self.cache: Dict[str, List[Dict]] = {}
+        self._parse_xml()
+
+    def _parse_xml(self):
+        """
+        Parse the XML file and build a comprehensive cache of item information
+        """
+        try:
+            tree = ET.parse(self.xml_file_path)
+            root = tree.getroot()
+            
+            # Iterate through all classref elements of the specific type
+            for elem in root.findall(".//classref[@type='1637199632']"):
+                unit_class_elem = elem.find("./string[@name='mUnitClass']")
+                if unit_class_elem is None:
+                    continue
+                
+                unit_class = unit_class_elem.get("value")
+                if not unit_class:
+                    continue
+                
+                # Initialize list for this unit class if not exists
+                if unit_class not in self.cache:
+                    self.cache[unit_class] = []
+                
+                # Extract detailed information
+                mp_info = elem.find("./classref[@name='mpInfo']")
+                if mp_info is None:
+                    continue
+                
+                # Position information
+                position = mp_info.find("./vector3[@name='mPosition']")
+                if position is None:
+                    continue
+                
+                try:
+                    x = float(position.get('x', '0'))
+                    y = float(position.get('y', '0'))
+                    z = float(position.get('z', '0'))
+                except ValueError:
+                    continue
+                
+                # Item set information
+                item_type = None
+                set_type = None
+                item_id = None
+                item_set = mp_info.find(".//class[@name='mItemSet']")
+                if item_set is not None:
+                    item_type_elem = item_set.find("./u8[@name='ItemType']")
+                    set_type_elem = item_set.find("./u8[@name='SetType']")
+                    item_id_elem = item_set.find("./u16[@name='ItemId']")
+                    
+                    item_type = int(item_type_elem.get("value", "0")) if item_type_elem is not None else None
+                    set_type = int(set_type_elem.get("value", "0")) if set_type_elem is not None else None
+                    item_id = int(item_id_elem.get("value", "0")) if item_id_elem is not None else None
+                
+                # Store comprehensive item information
+                item_info = {
+                    'element': elem,  # Keep the original XML element for modification
+                    'coordinates': (x, y, z),
+                    'item_type': item_type,
+                    'set_type': set_type,
+                    'item_id': item_id,
+                    'distance': None  # Will be calculated during matching
+                }
+                
+                self.cache[unit_class].append(item_info)
+            
+            logging.info(f"Cached {sum(len(items) for items in self.cache.values())} items from {self.xml_file_path}")
+        
+        except Exception as e:
+            logging.error(f"Error parsing XML file {self.xml_file_path}: {e}")
+            logging.exception("Stack trace:")
+
+    def find_best_match(self, vanilla_item: str, target_x: float, target_y: float, target_z: float) -> Dict:
+        """
+        Find the best matching item based on unit class and coordinates
+        
+        :param vanilla_item: The unit class to match
+        :param target_x: Target X coordinate
+        :param target_y: Target Y coordinate
+        :param target_z: Target Z coordinate
+        :return: Best matching item information
+        """
+        # Check if the unit class exists in cache
+        if vanilla_item not in self.cache or not self.cache[vanilla_item]:
+            logging.error(f"No items found for unit class {vanilla_item}")
+            return None
+        
+        # For SetType non-zero, look for (0,0,0) coordinates
+        non_zero_set_type_matches = [
+            item for item in self.cache[vanilla_item] 
+            if item['set_type'] is not None and item['set_type'] != 0 
+            and item['coordinates'] == (0, 0, 0)
+        ]
+        
+        if non_zero_set_type_matches:
+            logging.info(f"Found {len(non_zero_set_type_matches)} matches for {vanilla_item} with non-zero SetType")
+            return non_zero_set_type_matches[0]
+        
+        # For SetType 0, find closest coordinates
+        for item in self.cache[vanilla_item]:
+            if item['set_type'] == 0:
+                x, y, z = item['coordinates']
+                # Calculate distance
+                distance = ((x - target_x) ** 2 + (y - target_y) ** 2 + (z - target_z) ** 2) ** 0.5
+                item['distance'] = distance
+        
+        # Filter SetType 0 items and sort by distance
+        zero_set_type_matches = [
+            item for item in self.cache[vanilla_item] 
+            if item['set_type'] == 0 and item['distance'] is not None
+        ]
+        
+        if zero_set_type_matches:
+            best_match = min(zero_set_type_matches, key=lambda x: x['distance'])
+            logging.info(f"Found closest match for {vanilla_item} at {best_match['coordinates']} with distance {best_match['distance']:.2f}")
+            return best_match
+        
+        logging.error(f"No valid matches found for {vanilla_item}")
+        return None
+
+    def save_modifications(self, tree):
+        """
+        Save modifications to the XML file
+        
+        :param tree: Modified XML ElementTree
+        """
+        try:
+            tree.write(self.xml_file_path)
+            logging.info(f"Saved changes to {self.xml_file_path}")
+        except Exception as e:
+            logging.error(f"Error saving modifications to {self.xml_file_path}: {e}")
 
 def select_folder():
     print("Please navigate to your Resident Evil 5 installation and select the Archive folder.")
@@ -55,6 +198,10 @@ def process_arc_file_batch(output_folder, arc_file, modifications):
         return
 
     try:
+        # Create XML cache
+        xml_cache = XMLItemCache(xml_file_path)
+        
+        # Parse the XML tree for modification
         tree = ET.parse(xml_file_path)
         root = tree.getroot()
         
@@ -65,119 +212,37 @@ def process_arc_file_batch(output_folder, arc_file, modifications):
             target_y = float(ycord)
             target_z = float(zcord)
             
-            # First, find and log all elements with matching mUnitClass
-            all_matches = []
-            special_matches = []  # For (0,0,0) with ItemType 2 or 3
-            logging.info(f"Searching for all instances of {vanilla_item} in {xml_file_path}")
-            logging.info(f"Target coordinates: ({target_x}, {target_y}, {target_z})")
+            # Find best match using the cache
+            best_match = xml_cache.find_best_match(vanilla_item, target_x, target_y, target_z)
             
-            # Format as a table header
-            logging.info(f"{'Match #':<8}{'X':<20}{'Y':<20}{'Z':<20}{'Distance':<15}{'ItemType':<10}")
-            logging.info("-" * 90)
+            if best_match is None:
+                logging.error(f"No match found for {vanilla_item} with coordinates ({target_x}, {target_y}, {target_z})")
+                continue
             
-            # Find all elements with matching mUnitClass
-            match_count = 0
-            for elem in root.findall(".//classref[@type='1637199632']"):
-                unit_class = elem.find("./string[@name='mUnitClass']")
-                if unit_class is not None and unit_class.get("value") == vanilla_item:
-                    mp_info = elem.find("./classref[@name='mpInfo']")
-                    if mp_info is not None:
-                        position = mp_info.find("./vector3[@name='mPosition']")
-                        
-                        # Check for ItemType
-                        item_type = None
-                        item_set = mp_info.find(".//class[@name='mItemSet']")
-                        if item_set is not None:
-                            item_type_elem = item_set.find("./u8[@name='ItemType']")
-                            if item_type_elem is not None:
-                                item_type = int(item_type_elem.get("value", "0"))
-                        
-                        if position is not None:
-                            try:
-                                x = float(position.get('x', '0'))
-                                y = float(position.get('y', '0'))
-                                z = float(position.get('z', '0'))
-                                
-                                # Calculate distance
-                                distance = ((x - target_x) ** 2 + (y - target_y) ** 2 + (z - target_z) ** 2) ** 0.5
-                                
-                                match_count += 1
-                                # Log as table row
-                                logging.info(f"{match_count:<8}{x:<20}{y:<20}{z:<20}{distance:<15.2f}{item_type if item_type is not None else 'N/A':<10}")
-                                
-                                # Check for special case: (0,0,0) coordinates with ItemType 2 or 3
-                                if x == 0 and y == 0 and z == 0 and item_type in (2, 3):
-                                    logging.info(f"Found special case: coordinates (0,0,0) with ItemType {item_type}")
-                                    special_matches.append({
-                                        'distance': 0,  # Priority match
-                                        'coordinates': (x, y, z),
-                                        'element': elem,
-                                        'item_type': item_type
-                                    })
-                                else:
-                                    # Store the match with its distance and coordinates
-                                    all_matches.append({
-                                        'distance': distance,
-                                        'coordinates': (x, y, z),
-                                        'element': elem,
-                                        'item_type': item_type
-                                    })
-                            except ValueError:
-                                logging.error(f"Invalid coordinate format in {xml_file_path}")
+            # Update the ItemId
+            mp_info = best_match['element'].find("./classref[@name='mpInfo']")
+            item_set = mp_info.find(".//class[@name='mItemSet']") if mp_info is not None else None
             
-            logging.info("-" * 90)  # End of table
-            
-            # Log summary of found coordinates
-            if all_matches or special_matches:
-                logging.info(f"Found {len(all_matches)} regular matches and {len(special_matches)} special matches for {vanilla_item} in {xml_file_path}")
-            else:
-                logging.error(f"No matching coordinates found for {vanilla_item} in {xml_file_path}.")
-                continue  # Skip to next modification if no matches found
-            
-            # Determine which match to use
-            best_match = None
-            
-            # If we have special matches (0,0,0 with ItemType 2 or 3), use the first one
-            if special_matches:
-                best_match = special_matches[0]
-                logging.info(f"Using special match for {vanilla_item}: coords (0,0,0), ItemType {best_match['item_type']}")
-            # Otherwise sort regular matches by distance and get the closest one
-            elif all_matches:
-                all_matches.sort(key=lambda x: x['distance'])
-                best_match = all_matches[0]
-                logging.info(f"Using closest match for {vanilla_item}: coords {best_match['coordinates']}, distance {best_match['distance']:.2f}")
-            
-            if best_match:
-                # Update the ItemId
-                mp_info = best_match['element'].find("./classref[@name='mpInfo']")
-                item_set = mp_info.find(".//class[@name='mItemSet']") if mp_info is not None else None
-                
-                if item_set is not None:
-                    item_id_elem = item_set.find("./u16[@name='ItemId']")
-                    if item_id_elem is not None:
-                        old_value = item_id_elem.get("value")
-                        item_id_elem.set("value", str(new_item_id))
-                        if 'item_type' in best_match and best_match['item_type'] in (2, 3):
-                            logging.info(f"Updated ItemId from {old_value} to {new_item_id} for {vanilla_item} at (0,0,0) with ItemType {best_match['item_type']} in {xml_file_path}.")
-                        else:
-                            logging.info(f"Updated ItemId from {old_value} to {new_item_id} for {vanilla_item} at {best_match['coordinates']} in {xml_file_path}.")
-                    else:
-                        logging.error(f"ItemId element not found for {vanilla_item} at {best_match['coordinates']} in {xml_file_path}.")
+            if item_set is not None:
+                item_id_elem = item_set.find("./u16[@name='ItemId']")
+                if item_id_elem is not None:
+                    old_value = item_id_elem.get("value")
+                    item_id_elem.set("value", str(new_item_id))
+                    logging.info(f"Updated ItemId from {old_value} to {new_item_id} for {vanilla_item} at {best_match['coordinates']} with SetType {best_match.get('set_type', 'N/A')} in {xml_file_path}.")
                 else:
-                    logging.error(f"mItemSet not found for {vanilla_item} at {best_match['coordinates']} in {xml_file_path}.")
+                    logging.error(f"ItemId element not found for {vanilla_item} at {best_match['coordinates']} in {xml_file_path}.")
             else:
-                logging.error(f"No valid matches found for {vanilla_item} in {xml_file_path} after checking both regular and special cases.")
+                logging.error(f"mItemSet not found for {vanilla_item} at {best_match['coordinates']} in {xml_file_path}.")
         
-        # Save the modified XML
-        tree.write(xml_file_path)
-        logging.info(f"Saved changes to {xml_file_path}")
+        # Save modifications using the cache method
+        xml_cache.save_modifications(tree)
         
         # Repack the arc file
         repack_arc_file(arc_file)
         
     except Exception as e:
         logging.error(f"Error processing {xml_file_path}: {e}")
-        logging.exception("Stack trace:")  # This will log the full stack trace
+        logging.exception("Stack trace:")
 
 def repack_arc_file(arc_file):
     try:
@@ -250,11 +315,8 @@ def update_item_ids(arc_folder):
                 folder_path = os.path.join(exe_folder, folder)
                 if os.path.isdir(folder_path) and folder.startswith('s') and folder[1:].isdigit():
                     logging.info(f"Removing unpacked folder {folder_path}...")
-                    shutil.rmtree(folder_path, ignore_errors=True)
-            logging.info("Error cleanup completed.")
-        except Exception as cleanup_error:
-            logging.error(f"Error during cleanup: {cleanup_error}")
-
+                    shutil.rmtree
+                    
 if __name__ == "__main__":
     arc_folder = select_folder()
 
